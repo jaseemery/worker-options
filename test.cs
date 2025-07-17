@@ -189,7 +189,7 @@ public class WorkflowAutoStartService : IHostedService
                 { "environment", Environment.GetEnvironmentVariable("ENVIRONMENT") ?? "development" }
             });
 
-        var schedule = new Temporalio.Client.Schedules.Schedule
+        var schedule = new Schedule
         {
             Action = ScheduleActionStartWorkflow.Create(
                 (RecurringWorkflow wf) => wf.RunAsync(workflowInput),
