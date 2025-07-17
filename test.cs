@@ -126,6 +126,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Temporalio.Client;
 using Temporalio.Client.Schedules;
+using Temporalio.Common;
 
 public class WorkflowAutoStartService : IHostedService
 {
@@ -188,7 +189,7 @@ public class WorkflowAutoStartService : IHostedService
                 { "environment", Environment.GetEnvironmentVariable("ENVIRONMENT") ?? "development" }
             });
 
-        var schedule = new Schedule
+        var schedule = new Temporalio.Client.Schedules.Schedule
         {
             Action = ScheduleActionStartWorkflow.Create(
                 (RecurringWorkflow wf) => wf.RunAsync(workflowInput),
@@ -196,7 +197,7 @@ public class WorkflowAutoStartService : IHostedService
                 {
                     Id = $"recurring-workflow-{DateTime.UtcNow:yyyyMMdd}",
                     TaskQueue = TaskQueue,
-                    RetryPolicy = new()
+                    RetryPolicy = new RetryPolicy
                     {
                         InitialInterval = TimeSpan.FromSeconds(1),
                         BackoffCoefficient = 2.0,
@@ -210,17 +211,17 @@ public class WorkflowAutoStartService : IHostedService
                 // Run every 30 seconds (adjust as needed)
                 Intervals = new List<ScheduleIntervalSpec>
                 {
-                    new(Every: TimeSpan.FromSeconds(30))
+                    new ScheduleIntervalSpec(Every: TimeSpan.FromSeconds(30))
                 }
                 
                 // Alternative examples:
-                // Every 5 minutes: new(Every: TimeSpan.FromMinutes(5))
-                // Every hour: new(Every: TimeSpan.FromHours(1))
+                // Every 5 minutes: new ScheduleIntervalSpec(Every: TimeSpan.FromMinutes(5))
+                // Every hour: new ScheduleIntervalSpec(Every: TimeSpan.FromHours(1))
                 
                 // For calendar-based scheduling, use Calendars instead:
                 // Calendars = new List<ScheduleCalendarSpec>
                 // {
-                //     new() { Hour = new[] { 9 }, Minute = new[] { 0 } } // Daily at 9:00 AM
+                //     new ScheduleCalendarSpec { Hour = new[] { 9 }, Minute = new[] { 0 } } // Daily at 9:00 AM
                 // }
             },
             
