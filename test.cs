@@ -189,55 +189,52 @@ public class WorkflowAutoStartService : IHostedService
                 { "environment", Environment.GetEnvironmentVariable("ENVIRONMENT") ?? "development" }
             });
 
-        var scheduleAction = ScheduleActionStartWorkflow.Create(
-            (RecurringWorkflow wf) => wf.RunAsync(workflowInput),
-            new WorkflowOptions
-            {
-                Id = $"recurring-workflow-{DateTime.UtcNow:yyyyMMdd}",
-                TaskQueue = TaskQueue,
-                RetryPolicy = new RetryPolicy
+        var schedule = new Schedule(
+            Action: new ScheduleActionStartWorkflow(
+                Workflow: "RecurringWorkflow",
+                Args: new object[] { workflowInput },
+                Options: new WorkflowOptions
                 {
-                    InitialInterval = TimeSpan.FromSeconds(1),
-                    BackoffCoefficient = 2.0,
-                    MaximumInterval = TimeSpan.FromMinutes(5),
-                    MaximumAttempts = 3
-                }
-            });
-
-        var scheduleSpec = new ScheduleSpec
-        {
-            // Run every 30 seconds (adjust as needed)
-            Intervals = new List<ScheduleIntervalSpec>
+                    Id = $"recurring-workflow-{DateTime.UtcNow:yyyyMMdd}",
+                    TaskQueue = TaskQueue,
+                    RetryPolicy = new RetryPolicy
+                    {
+                        InitialInterval = TimeSpan.FromSeconds(1),
+                        BackoffCoefficient = 2.0,
+                        MaximumInterval = TimeSpan.FromMinutes(5),
+                        MaximumAttempts = 3
+                    }
+                }),
+            Spec: new ScheduleSpec
             {
-                new ScheduleIntervalSpec(Every: TimeSpan.FromSeconds(30))
+                // Run every 30 seconds (adjust as needed)
+                Intervals = new List<ScheduleIntervalSpec>
+                {
+                    new ScheduleIntervalSpec(Every: TimeSpan.FromSeconds(30))
+                }
+                
+                // Alternative examples:
+                // Every 5 minutes: new ScheduleIntervalSpec(Every: TimeSpan.FromMinutes(5))
+                // Every hour: new ScheduleIntervalSpec(Every: TimeSpan.FromHours(1))
+                
+                // For calendar-based scheduling, use Calendars instead:
+                // Calendars = new List<ScheduleCalendarSpec>
+                // {
+                //     new ScheduleCalendarSpec { Hour = new[] { 9 }, Minute = new[] { 0 } } // Daily at 9:00 AM
+                // }
+            })
+        {
+            Policy = new SchedulePolicy
+            {
+                // Skip if previous workflow is still running
+                Overlap = ScheduleOverlapPolicy.Skip,
+                
+                // Allow catching up for missed runs within 1 hour
+                CatchupWindow = TimeSpan.FromHours(1),
+                
+                // Pause schedule if workflows keep failing
+                PauseOnFailure = true
             }
-            
-            // Alternative examples:
-            // Every 5 minutes: new ScheduleIntervalSpec(Every: TimeSpan.FromMinutes(5))
-            // Every hour: new ScheduleIntervalSpec(Every: TimeSpan.FromHours(1))
-            
-            // For calendar-based scheduling, use Calendars instead:
-            // Calendars = new List<ScheduleCalendarSpec>
-            // {
-            //     new ScheduleCalendarSpec { Hour = new[] { 9 }, Minute = new[] { 0 } } // Daily at 9:00 AM
-            // }
-        };
-
-        var schedulePolicy = new SchedulePolicy
-        {
-            // Skip if previous workflow is still running
-            Overlap = ScheduleOverlapPolicy.Skip,
-            
-            // Allow catching up for missed runs within 1 hour
-            CatchupWindow = TimeSpan.FromHours(1),
-            
-            // Pause schedule if workflows keep failing
-            PauseOnFailure = true
-        };
-
-        var schedule = new Schedule(scheduleAction, scheduleSpec)
-        {
-            Policy = schedulePolicy
         };
 
         try
