@@ -32,7 +32,13 @@ builder.Services.AddHostedTemporalWorker(
     .AddWorkflow<RecurringWorkflow>()
     .AddScopedActivities<RecurringActivities>();
 
-// Add the auto-start service
+// ===== YOUR STRING DATA - MODIFY THIS =====
+var myWorkflowInput = "process-user-data-batch-123";
+// Or from configuration: var myWorkflowInput = builder.Configuration["WorkflowInput"];
+// Or from environment: var myWorkflowInput = Environment.GetEnvironmentVariable("WORKFLOW_INPUT") ?? "default-input";
+
+// Pass the string to the auto-start service
+builder.Services.AddSingleton(myWorkflowInput);
 builder.Services.AddHostedService<WorkflowAutoStartService>();
 
 var host = builder.Build();
@@ -58,16 +64,16 @@ public class RecurringWorkflow
     };
 
     [WorkflowRun]
-    public async Task<string> RunAsync(RecurringWorkflowInput input)
+    public async Task<string> RunAsync(string workflowInput)
     {
         var logger = Workflow.Logger;
-        logger.LogInformation("Starting recurring workflow execution for: {TaskName}", input.TaskName);
+        logger.LogInformation("Starting recurring workflow with input: {Input}", workflowInput);
 
         try
         {
-            // Execute the main business logic
+            // Pass the string directly to your activity
             var result = await Workflow.ExecuteActivityAsync(
-                (RecurringActivities activities) => activities.DoRecurringTaskAsync(input),
+                (RecurringActivities activities) => activities.DoRecurringTaskAsync(workflowInput),
                 DefaultActivityOptions);
 
             logger.LogInformation("Recurring workflow completed successfully: {Result}", result);
@@ -93,32 +99,34 @@ public class RecurringActivities
     }
 
     [Activity]
-    public async Task<string> DoRecurringTaskAsync(RecurringWorkflowInput input)
+    public async Task<string> DoRecurringTaskAsync(string workflowInput)
     {
-        _logger.LogInformation("Executing recurring task: {TaskName} at {Timestamp}", 
-            input.TaskName, DateTime.UtcNow);
+        _logger.LogInformation("Executing recurring task with input: {Input} at {Timestamp}", 
+            workflowInput, DateTime.UtcNow);
 
-        // Simulate some work
+        // Use your string input in your business logic
+        // For example, it could be:
+        // - A file path to process
+        // - A batch ID to work on
+        // - A configuration key
+        // - A queue name
+        // - Any string data your activity needs
+
+        // Simulate some work based on the input
         await Task.Delay(TimeSpan.FromSeconds(2));
 
         // Your actual business logic goes here
-        // For example: data processing, cleanup, monitoring, etc.
+        // Use the workflowInput string to determine what to process
+        var result = $"Processed '{workflowInput}' at {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}";
         
-        var result = $"Task '{input.TaskName}' completed at {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}";
-        _logger.LogInformation("Task result: {Result}", result);
-        
+        _logger.LogInformation("Task completed: {Result}", result);
         return result;
     }
 }
 
-// ===== INPUT MODEL =====
+// ===== INPUT MODEL (SIMPLIFIED) =====
 
-public record RecurringWorkflowInput(
-    string TaskName,
-    Dictionary<string, object>? Parameters = null)
-{
-    public RecurringWorkflowInput() : this("DefaultTask") { } // Required for Temporal serialization
-}
+// No longer needed - we're just using a string directly!
 
 // ===== AUTO-START SERVICE =====
 
@@ -132,20 +140,23 @@ public class WorkflowAutoStartService : IHostedService
 {
     private readonly ITemporalClient _client;
     private readonly ILogger<WorkflowAutoStartService> _logger;
+    private readonly string _workflowInput;
     private const string ScheduleId = "recurring-workflow-schedule";
     private const string TaskQueue = "recurring-task-queue";
 
     public WorkflowAutoStartService(
         ITemporalClient client, 
-        ILogger<WorkflowAutoStartService> logger)
+        ILogger<WorkflowAutoStartService> logger,
+        string workflowInput)
     {
         _client = client;
         _logger = logger;
+        _workflowInput = workflowInput;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        _logger.LogInformation("Initializing auto-start service...");
+        _logger.LogInformation("Initializing auto-start service with input: {Input}", _workflowInput);
 
         // Wait a moment for worker to be ready
         await Task.Delay(2000, cancellationToken);
@@ -153,11 +164,11 @@ public class WorkflowAutoStartService : IHostedService
         try
         {
             await CreateOrUpdateScheduleAsync(cancellationToken);
-            _logger.LogInformation("Recurring workflow schedule successfully created/updated");
+            _logger.LogInformation("Schedule successfully created/updated with input: {Input}", _workflowInput);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to create recurring workflow schedule");
+            _logger.LogError(ex, "Failed to create schedule with input: {Input}", _workflowInput);
             throw; // Fail startup if we can't create the schedule
         }
     }
@@ -181,18 +192,10 @@ public class WorkflowAutoStartService : IHostedService
 
     private async Task CreateOrUpdateScheduleAsync(CancellationToken cancellationToken)
     {
-        var workflowInput = new RecurringWorkflowInput(
-            TaskName: "AutoStarted-RecurringTask",
-            Parameters: new Dictionary<string, object>
-            {
-                { "source", "auto-start" },
-                { "environment", Environment.GetEnvironmentVariable("ENVIRONMENT") ?? "development" }
-            });
-
         var schedule = new Schedule(
             Action: new ScheduleActionStartWorkflow(
                 Workflow: "RecurringWorkflow",
-                Args: new object[] { workflowInput },
+                Args: new object[] { _workflowInput }, // Pass your string directly
                 Options: new WorkflowOptions
                 {
                     Id = $"recurring-workflow-{DateTime.UtcNow:yyyyMMdd}",
@@ -212,16 +215,6 @@ public class WorkflowAutoStartService : IHostedService
                 {
                     new ScheduleIntervalSpec(Every: TimeSpan.FromSeconds(30))
                 }
-                
-                // Alternative examples:
-                // Every 5 minutes: new ScheduleIntervalSpec(Every: TimeSpan.FromMinutes(5))
-                // Every hour: new ScheduleIntervalSpec(Every: TimeSpan.FromHours(1))
-                
-                // For calendar-based scheduling, use Calendars instead:
-                // Calendars = new List<ScheduleCalendarSpec>
-                // {
-                //     new ScheduleCalendarSpec { Hour = new[] { 9 }, Minute = new[] { 0 } } // Daily at 9:00 AM
-                // }
             })
         {
             Policy = new SchedulePolicy
@@ -236,6 +229,28 @@ public class WorkflowAutoStartService : IHostedService
                 PauseOnFailure = true
             }
         };
+
+        try
+        {
+            // Try to create the schedule
+            await _client.CreateScheduleAsync(ScheduleId, schedule);
+            _logger.LogInformation("Created new schedule: {ScheduleId}", ScheduleId);
+        }
+        catch (ScheduleAlreadyRunningException)
+        {
+            // Schedule already exists, update it
+            _logger.LogInformation("Schedule already exists, updating: {ScheduleId}", ScheduleId);
+            
+            var handle = _client.GetScheduleHandle(ScheduleId);
+            await handle.UpdateAsync(update =>
+            {
+                update.Schedule = schedule;
+                return update;
+            });
+            
+            _logger.LogInformation("Updated existing schedule: {ScheduleId}", ScheduleId);
+        }
+    }
 
         try
         {
@@ -274,7 +289,60 @@ public class WorkflowAutoStartService : IHostedService
     "ServerAddress": "localhost:7233",
     "Namespace": "default",
     "TaskQueue": "recurring-task-queue"
+  },
+  "WorkflowSettings": {
+    "DatabaseConnectionString": "Server=localhost;Database=MyApp;",
+    "ApiKey": "your-api-key-here",
+    "ProcessingBatchSize": 50,
+    "EnableDetailedLogging": true,
+    "ExternalServiceUrl": "https://external-service.com/api"
   }
+}
+*/
+
+// ===== ALTERNATIVE: STRONGLY TYPED CONFIGURATION =====
+/*
+// Create a configuration class
+public class WorkflowConfiguration
+{
+    public string Environment { get; set; } = "";
+    public string Version { get; set; } = "1.0.0";
+    public int MaxRetries { get; set; } = 3;
+    public int TimeoutSeconds { get; set; } = 300;
+    public List<string> Features { get; set; } = new();
+    public Dictionary<string, object> CustomSettings { get; set; } = new();
+}
+
+// In Program.cs, use strongly typed configuration:
+var workflowConfig = new WorkflowConfiguration
+{
+    Environment = builder.Environment.EnvironmentName,
+    Version = "2.0.0",
+    MaxRetries = 5,
+    TimeoutSeconds = 600,
+    Features = new List<string> { "feature1", "feature2" },
+    CustomSettings = new Dictionary<string, object>
+    {
+        { "batchSize", 100 },
+        { "apiEndpoint", "https://api.example.com" }
+    }
+};
+
+// Or bind from configuration:
+var workflowConfig = builder.Configuration.GetSection("WorkflowConfig").Get<WorkflowConfiguration>();
+
+// Register as singleton
+builder.Services.AddSingleton(workflowConfig);
+
+// Then in WorkflowAutoStartService constructor:
+public WorkflowAutoStartService(
+    ITemporalClient client, 
+    ILogger<WorkflowAutoStartService> logger,
+    WorkflowConfiguration workflowConfig)
+{
+    _client = client;
+    _logger = logger;
+    _workflowConfig = workflowConfig;
 }
 */
 
