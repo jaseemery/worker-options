@@ -1,0 +1,282 @@
+// Program.cs - Configure services and Temporal worker
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Temporalio.Extensions.Hosting;
+using ApiRequestor.Extensions;
+using ApiRequestor.Services;
+
+var builder = Host.CreateApplicationBuilder(args);
+
+// Add logging
+builder.Services.AddLogging();
+
+// Add ApiRequestor with configuration
+builder.Services.AddApiRequestor(builder.Configuration, "ApiConfiguration");
+
+// Add Temporal services
+builder.Services.AddTemporalClient(options =>
+{
+    options.TargetHost = "localhost:7233";
+    options.Namespace = "default";
+});
+
+builder.Services.AddHostedTemporalWorker("my-task-queue")
+    .AddActivitiesInstance<ApiActivities>();
+
+var host = builder.Build();
+await host.RunAsync();
+
+// Activities/ApiActivities.cs - Temporal activities using ApiRequestor
+using Microsoft.Extensions.Logging;
+using Temporalio.Activities;
+using ApiRequestor.Services;
+using ApiRequestor.Models;
+
+public class ApiActivities
+{
+    private readonly IApiRequestService _apiService;
+    private readonly ILogger<ApiActivities> _logger;
+
+    public ApiActivities(IApiRequestService apiService, ILogger<ApiActivities> logger)
+    {
+        _apiService = apiService;
+        _logger = logger;
+    }
+
+    [Activity]
+    public async Task<UserData?> GetUserAsync(int userId)
+    {
+        _logger.LogInformation("Fetching user data for ID: {UserId}", userId);
+
+        var response = await _apiService.ExecuteAsync<UserData>("GetUser", new { id = userId });
+        
+        if (!response.IsSuccess)
+        {
+            _logger.LogError("Failed to fetch user: {Error}", response.ErrorMessage);
+            throw new ApplicationException($"Failed to fetch user: {response.ErrorMessage}");
+        }
+
+        return response.Data;
+    }
+
+    [Activity]
+    public async Task<bool> CreateUserAsync(CreateUserRequest request)
+    {
+        _logger.LogInformation("Creating user: {Email}", request.Email);
+
+        // Create a custom endpoint for this request
+        var endpoint = new ApiEndpoint
+        {
+            Name = "CreateUser",
+            Method = "POST",
+            Path = "/api/users",
+            Body = request,
+            ContentType = "application/json"
+        };
+
+        var response = await _apiService.ExecuteCustomAsync<CreateUserResponse>(endpoint);
+        
+        if (!response.IsSuccess)
+        {
+            _logger.LogError("Failed to create user: {Error}", response.ErrorMessage);
+            throw new ApplicationException($"Failed to create user: {response.ErrorMessage}");
+        }
+
+        return response.Data?.Success ?? false;
+    }
+
+    [Activity]
+    public async Task<List<Product>> GetProductsAsync(string category = "all")
+    {
+        _logger.LogInformation("Fetching products for category: {Category}", category);
+
+        var response = await _apiService.ExecuteAsync<List<Product>>("GetProducts", 
+            new { category = category });
+        
+        if (!response.IsSuccess)
+        {
+            _logger.LogError("Failed to fetch products: {Error}", response.ErrorMessage);
+            throw new ApplicationException($"Failed to fetch products: {response.ErrorMessage}");
+        }
+
+        return response.Data ?? new List<Product>();
+    }
+
+    [Activity]
+    public async Task<ApiHealthStatus> CheckApiHealthAsync()
+    {
+        _logger.LogInformation("Checking API health");
+
+        var response = await _apiService.ExecuteAsync<ApiHealthStatus>("HealthCheck");
+        
+        return new ApiHealthStatus
+        {
+            IsHealthy = response.IsSuccess,
+            StatusCode = response.StatusCode,
+            Message = response.IsSuccess ? "API is healthy" : response.ErrorMessage ?? "Unknown error",
+            Timestamp = DateTime.UtcNow
+        };
+    }
+}
+
+// Models/ActivityModels.cs - Data models for activities
+public class UserData
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string Email { get; set; } = string.Empty;
+    public DateTime CreatedAt { get; set; }
+}
+
+public class CreateUserRequest
+{
+    public string Name { get; set; } = string.Empty;
+    public string Email { get; set; } = string.Empty;
+    public string Password { get; set; } = string.Empty;
+}
+
+public class CreateUserResponse
+{
+    public bool Success { get; set; }
+    public int? UserId { get; set; }
+    public string? Message { get; set; }
+}
+
+public class Product
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string Category { get; set; } = string.Empty;
+    public decimal Price { get; set; }
+}
+
+public class ApiHealthStatus
+{
+    public bool IsHealthy { get; set; }
+    public int StatusCode { get; set; }
+    public string Message { get; set; } = string.Empty;
+    public DateTime Timestamp { get; set; }
+}
+
+// Workflows/UserManagementWorkflow.cs - Example workflow using the activities
+using Temporalio.Workflows;
+
+[Workflow("UserManagementWorkflow")]
+public class UserManagementWorkflow
+{
+    [WorkflowRun]
+    public async Task<UserManagementResult> RunAsync(UserManagementInput input)
+    {
+        var result = new UserManagementResult();
+
+        try
+        {
+            // Check API health first
+            var healthStatus = await Workflow.ExecuteActivityAsync(
+                (ApiActivities act) => act.CheckApiHealthAsync(),
+                new ActivityOptions { StartToCloseTimeout = TimeSpan.FromMinutes(1) });
+
+            if (!healthStatus.IsHealthy)
+            {
+                result.Success = false;
+                result.ErrorMessage = $"API is not healthy: {healthStatus.Message}";
+                return result;
+            }
+
+            // Create user
+            var createSuccess = await Workflow.ExecuteActivityAsync(
+                (ApiActivities act) => act.CreateUserAsync(new CreateUserRequest
+                {
+                    Name = input.UserName,
+                    Email = input.Email,
+                    Password = input.Password
+                }),
+                new ActivityOptions { StartToCloseTimeout = TimeSpan.FromMinutes(2) });
+
+            if (!createSuccess)
+            {
+                result.Success = false;
+                result.ErrorMessage = "Failed to create user";
+                return result;
+            }
+
+            // Get products for welcome email
+            var products = await Workflow.ExecuteActivityAsync(
+                (ApiActivities act) => act.GetProductsAsync("featured"),
+                new ActivityOptions { StartToCloseTimeout = TimeSpan.FromMinutes(1) });
+
+            result.Success = true;
+            result.Message = $"User created successfully. Found {products.Count} featured products.";
+            result.FeaturedProductCount = products.Count;
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            result.Success = false;
+            result.ErrorMessage = ex.Message;
+            return result;
+        }
+    }
+}
+
+public class UserManagementInput
+{
+    public string UserName { get; set; } = string.Empty;
+    public string Email { get; set; } = string.Empty;
+    public string Password { get; set; } = string.Empty;
+}
+
+public class UserManagementResult
+{
+    public bool Success { get; set; }
+    public string? Message { get; set; }
+    public string? ErrorMessage { get; set; }
+    public int FeaturedProductCount { get; set; }
+}
+
+// appsettings.json - Configuration file
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft": "Warning",
+      "Microsoft.Hosting.Lifetime": "Information"
+    }
+  },
+  "ApiConfiguration": {
+    "BaseUrl": "https://api.example.com",
+    "TimeoutSeconds": 30,
+    "DefaultHeaders": {
+      "User-Agent": "MyTemporalApp/1.0",
+      "Accept": "application/json"
+    },
+    "Authentication": {
+      "Type": "Bearer",
+      "Token": "your-api-token-here"
+    },
+    "Endpoints": [
+      {
+        "Name": "GetUser",
+        "Method": "GET",
+        "Path": "/api/users/{id}",
+        "Headers": {}
+      },
+      {
+        "Name": "GetProducts",
+        "Method": "GET",
+        "Path": "/api/products",
+        "QueryParameters": {
+          "category": "{category}"
+        }
+      },
+      {
+        "Name": "HealthCheck",
+        "Method": "GET",
+        "Path": "/api/health"
+      }
+    ]
+  }
+}
+Smart, efficient 
